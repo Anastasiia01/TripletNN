@@ -21,6 +21,9 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="Data.py">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="Triplet.py" />
     <Compile Include="TripletMNIST.py">
       <SubType>Code</SubType>

@@ -4,23 +4,25 @@ import os
 from sklearn.utils import shuffle
 from tensorflow.keras.utils import to_categorical
 import numpy as np
+from Data import Data
 
 class Triplet(object):
     def __init__(self):
         #----set up place holders for inputs and labels for the siamese network---
         # two input placeholders for Siamese network
-        self.tf_inputA = tf.placeholder(tf.float32, [None, 28,28,1], name = 'inputA')
-        self.tf_inputB = tf.placeholder(tf.float32, [None, 28,28,1], name = 'inputB')
+        self.tf_input0 = tf.placeholder(tf.float32, [None, 28,28,1], name = 'input0')
+        self.tf_inputPlus = tf.placeholder(tf.float32, [None, 28,28,1], name = 'inputPlus')
+        self.tf_inputMinus = tf.placeholder(tf.float32, [None, 28,28,1], name = 'inputMinus')
 
         # labels for the image pair # 1: similar, 0: dissimilar
         self.tf_Y = tf.placeholder(tf.float32, [None,], name = 'Y')
         self.tf_YOneHot = tf.placeholder(tf.float32, [None,10], name = 'YoneHot')
 
         # outputs, loss function and training optimizer
-        self.outputA, self.outputB = self.tripletNetwork()
+        self.output0, self.outputPlus,self.outputMinus = self.tripletNetwork()
         self.output = self.tripletNetworkWithClassification()
 
-        self.loss = self.contastiveLoss()
+        self.loss = self.tripletLoss()
         self.lossCrossEntropy = self.crossEntropyLoss()
         self.optimizer = self.optimizer_initializer()
         self.optimizerCrossEntropy = self.optimizer_initializer_crossEntropy()
@@ -29,8 +31,6 @@ class Triplet(object):
         # Initialize tensorflow session
         self.sess = tf.Session()
         self.sess.run(tf.global_variables_initializer())
-
-
 
     def layer(self, tf_input, num_hidden_units, variable_name, trainable=True):
         # tf_input: batch_size x n_features
@@ -59,12 +59,11 @@ class Triplet(object):
     def network(self, tf_input, trainable=True):
         # Setup CNN
         with tf.variable_scope("triplet") as scope:
-            fc1= tf.layers.Conv2D(filters=4,kernel_size=(3,3),strides=1,padding='SAME',trainable=trainable)(tf_input)
-            #fc1 = self.cnnLayer(tf_input = tf_input, feature_maps_out=4, kSize=3,trainable=trainable, variable_name = 'fc1')
+            fc1= tf.layers.Conv2D(filters=4,kernel_size=(3,3),strides=1,padding='VALID',trainable=trainable)(tf_input)
             #ac1 = tf.nn.relu(fc1)
             ac1=tf.nn.tanh(fc1)
             ac1_pooled=self.maxpool2d(ac1)
-            fc2=tf.layers.Conv2D(filters=8,kernel_size=(3,3),strides=1,padding='SAME',trainable=trainable)(ac1_pooled)
+            fc2=tf.layers.Conv2D(filters=8,kernel_size=(3,3),strides=1,padding='VALID',trainable=trainable)(ac1_pooled)
             #ac2 = tf.nn.relu(fc2)
             ac2=tf.nn.tanh(fc2)
             ac2_pooled=self.maxpool2d(ac2)
@@ -73,7 +72,7 @@ class Triplet(object):
             return out #embeddings that have the most relative info helpful for further classification
 
     def networkWithClassification(self, tf_input):
-        # Setup FNN
+        # Setup CNN
         fc3 = self.network(tf_input, trainable=False)
         ac3 = tf.nn.relu(fc3)
         fc4 = self.layer(tf_input = ac3, num_hidden_units = 200, trainable=True, variable_name = 'fc4')
@@ -84,19 +83,21 @@ class Triplet(object):
     def tripletNetwork(self):
         # Initialze neural network
         with tf.variable_scope("triplet") as scope:
-            outputA = self.network(self.tf_inputA)
+            output0 = self.network(self.tf_input0)
             # share weights
             scope.reuse_variables()
-            outputB = self.network(self.tf_inputB)
-        return outputA, outputB
+            outputPlus = self.network(self.tf_inputPlus)
+            scope.reuse_variables()
+            outputMinus = self.network(self.tf_inputMinus)
+        return output0, outputPlus, outputMinus
 
     def tripletNetworkWithClassification(self):
         # Initialze neural network
         with tf.variable_scope("triplet",reuse=tf.AUTO_REUSE) as scope:
-            output = self.networkWithClassification(self.tf_inputA)
+            output = self.networkWithClassification(self.tf_input0)
         return output
 
-    def contastiveLoss(self, margin = 5.0):
+    def contastiveLoss(self, margin = 5.0):# not used in triplet
         with tf.variable_scope("triplet") as scope:
             labels = self.tf_Y
             # Euclidean distance squared
@@ -109,6 +110,37 @@ class Triplet(object):
             lossDissimilar = tf.multiply(tf.subtract(1.0, labels), tf.pow(tf.maximum(tf.subtract(margin, Dw2), 0), 2), name = 'constrastiveLoss_2')
             loss = tf.reduce_mean(tf.add(lossSimilar, lossDissimilar), name = 'constrastiveLoss')
         return loss
+
+    def tripletLoss(self):
+        with tf.variable_scope("triplet") as scope:
+            negative_squared = tf.pow(tf.subtract(self.output0, self.outputPlus), 2)
+            magnitude_negative = tf.sqrt(tf.reduce_sum(negative_squared, 1))
+
+            positive_squared = tf.pow(tf.subtract(self.output0, self.outputMinus), 2)
+            magnitude_positive = tf.sqrt(tf.reduce_sum(positive_squared, 1))
+
+            e_to_positive  = tf.exp(magnitude_positive)
+            e_to_negative = tf.exp(magnitude_negative)
+            denom_softmax = tf.add(e_to_positive, e_to_negative)
+            #Softmax
+            d_plus = tf.math.divide(e_to_positive, denom_softmax)
+            d_minus = tf.math.divide(e_to_negative, denom_softmax)
+
+            loss = tf.pow(d_plus, 2) + tf.pow(tf.subtract(d_minus, 1), 2)
+            loss = tf.reduce_mean(loss)
+            return loss
+            '''dist=[]
+            dist.append(self.euclideanDist(self.output0,self.outputPlus))#dist[0]
+            dist.append(self.euclideanDist(self.output0,self.outputMinus))#dist[1]
+            softmax_d=tf.nn.softmax(dist)
+            loss=tf.reduce_mean(tf.pow(tf.subtract(dist,[0,1]), 2))
+        return loss'''
+
+    
+    def euclideanDist(self,x1,x2):
+        dist = tf.reduce_sum(tf.sqrt(tf.pow(tf.subtract(x1, x2), 2)))
+        return dist
+
 
     def crossEntropyLoss(self):
         labels = self.tf_YOneHot
@@ -132,21 +164,25 @@ class Triplet(object):
         optimizer = tf.train.AdamOptimizer(LEARNING_RATE).minimize(self.lossCrossEntropy)
         return optimizer
 
-    def trainTriplet(self, x, y, epochs, batchSize=10):
+    def trainTriplet(self, x, y, epochs, batchSize=10):#change for 3 inputs/outputs
         # Train the network
-        numSamples=x.shape[0]
-        numBatches=numSamples//batchSize
-        numSamples=batchSize*numBatches
+        data = Data(x,y)
+        #numBatches=numSamples//batchSize
+        #numS
+        #amples=batchSize*numBatches
         for i in range(epochs):
-            x,y=shuffle(x,y)
-            for j in range(0,numSamples,2*batchSize):
-                input1 = x[j:j+batchSize]
-                y1=y[j:j+batchSize]
+            data.assemple_in_triplets()
+            numBatches=len(data.list_of_triplets)//batchSize
+            numSamples=batchSize*numBatches
+            for j in range(0,numSamples,batchSize):
+                X = data.get_nextBatch(batchSize)
+                x0=X[:,0,:,:]
+                xPlus=X[:,1,:,:]
+                xMinus=X[:,2,:,:]
                 input2 = x[j+batchSize:j+2*batchSize]
-                y2=y[j+batchSize:j+2*batchSize]
-                label = (y1 == y2).astype('float')
                 _, trainingLoss = self.sess.run([self.optimizer, self.loss],
-                feed_dict = {self.tf_inputA: input1, self.tf_inputB: input2, self.tf_Y: label})
+                feed_dict = {self.tf_input0: x0, self.tf_inputPlus: xPlus, self.tf_inputMinus: xMinus})
+                #print(trainingLoss)
             print('iteration %d: train loss %.3f' % (i, trainingLoss))
 
     def trainTripletForClassification(self, x, y, epochs, batchSize=10):
@@ -162,15 +198,15 @@ class Triplet(object):
                 y1c = to_categorical(y1,num_classes=10) # convert labels to one hot
                 labels = np.zeros(batchSize)
                 _, trainingLoss = self.sess.run([self.optimizerCrossEntropy, self.lossCrossEntropy],
-                feed_dict = {self.tf_inputA: input1, self.tf_inputB: input1,self.tf_YOneHot: y1c, self.tf_Y:labels})
+                feed_dict = {self.tf_input0: input1, self.tf_inputPlus: input1,self.tf_inputMinus: input1,self.tf_YOneHot: y1c, self.tf_Y:labels})
             print('iteration %d: train loss %.3f' % (i, trainingLoss))
 
 
     def computeAccuracy(self,x,y):
         labels = np.zeros(100)
         yonehot = np.zeros((100,10))
-        aout = self.sess.run(self.output, feed_dict={self.tf_inputA: x,
-        self.tf_inputB: x,self.tf_YOneHot: yonehot, self.tf_Y:labels})
+        aout = self.sess.run(self.output, feed_dict={self.tf_input0: x,
+        self.tf_inputPlus: x,self.tf_inputMinus: x, self.tf_YOneHot: yonehot, self.tf_Y:labels})
         accuracyCount = 0
         testY = to_categorical(y) # one hot labels
         for i in range(testY.shape[0]):
@@ -180,8 +216,8 @@ class Triplet(object):
                 accuracyCount = accuracyCount + 1
         print("Accuracy count = " + str(accuracyCount/testY.shape[0]*100) + '%')
         
-    def test_model(self, input):
+    def test_model(self, input): #???change for 3 inputs/outputs
         # Test the trained model
-        output = self.sess.run(self.outputA, feed_dict = {self.tf_inputA: input})
+        output = self.sess.run(self.output0, feed_dict = {self.tf_input0: input})
         return output 
 
